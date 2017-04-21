@@ -1,83 +1,88 @@
-defmodule PCNode do
+defmodule PC3Node do
 
-  require Record
+  def coordinator(), do: coordinator([], :q, [])
 
-  Record.defrecordp :coordinator_state, :coordinator_state, [votes: []]
-  Record.defrecordp :slave_state, :slave_state, [decision: []]
-
-  def coordinator(), do: coordinator([], coordinator_state(votes: []))
-
-  defp coordinator(slaves, coordinator_state(votes: votes) = state) do
+  defp coordinator(slaves, state, votes) do
     receive() do
-      {:add_slave, pid} ->
-        log("Coordinator added slave: #{pid |> pid_to_string()}")
-        coordinator([pid | slaves], state)
+      {:add_slave, slave} ->
+        log("Coordinator added slave: #{slave |> pid_to_string()}")
+        coordinator([slave | slaves], state, votes)
       {:start_3pc} ->
-        log("Coordinator, 1st phase trying to commit")
-        query_to_commit(slaves)
-        coordinator(slaves, state)
+        log("Coordinator, 1st phase, sending xacts")
+        broadcast(slaves, {:xact, self()})
+        coordinator(slaves, :w, votes)
       {:vote, vote} ->
         log("Cordinator received a #{vote |> bool_to_string}")
         votes2 = [vote | votes]
         is_voting_done = length(votes2) == length(slaves)
         if is_voting_done do
-          completion(slaves, votes2)
+          done(slaves, votes2)
+          coordinator(slaves, state, votes2)
         else
-          newState = coordinator_state(state, votes: votes2)
-          coordinator(slaves, newState)
+          coordinator(slaves, state, votes2)
         end
     end
   end
 
-  defp completion(slaves, votes) do
-    log("As coordinator, 2nd phase")
-    consensus = Enum.all?(votes, &(&1 == :yes))
-    action = case consensus do
-      true ->  :commit
-      false -> :abort
-    end
-    broadcast(slaves, {action, self()})
-    wait_acks(length(slaves), action)
-  end
+  def slave(), do: slave([], :q, nil)
 
-
-  defp wait_acks(0, final), do: log(final)
-
-  defp wait_acks(remaining, final) do
-    case final do
-      0 -> log(final)
-      _ -> 
-      receive() do
-        {:ack} ->
-          wait_acks(remaining - 1, final)
-      end
-    end
-  end
-
-  def slave(), do: slave([], slave_state(decision: nil))
-
-  defp slave(slaves, state) do
+  defp slave(slaves, state, vote) do
     receive() do
       {:vote, decision} ->
-        log("Will propose: #{bool_to_string(decision)}")
-        slave(slaves, slave_state(decision: decision))
-      {:query, coordinator} ->
-        log("Queried by coordinator")
-        send(coordinator, {:vote, slave_state(state, :decision)})
-        slave(slaves, state)
-      {:commit, coordinator} ->
+        case decision do
+          :yes -> 
+            slave(slaves, :w, decision)
+          :no ->
+            slave(slaves, :a, decision)
+        end
+      {:xact, coordinator} ->
+        log("xact from coordinator, sending #{bool_to_string(vote)}") # xact
+        send(coordinator, {:vote, vote})
+        slave(slaves, state, vote)
+      {:prepare, coordinator} ->
+        log("prepare from coordinator, sending ack") # xact
+        send(coordinator, {:ack})
+      {:commit, _} ->
         log(:commit)
-        send(coordinator, {:ack})
-      {:abort, coordinator} ->
+      {:abort, _} ->
         log(:abort)
-        send(coordinator, {:ack})
     end
   end
 
+  defp done(slaves, votes) do
+    consensus = Enum.all?(votes, &(&1 == :yes))
+    log("Coordinator received all votes: [#{Enum.map(votes, &(&1 |> bool_to_string)) |> Enum.join(",")}]")
+    action = case consensus do
+      true ->  
+        log("Coordinating sending out prepare msges")
+        :prepare
+      false -> 
+        log("Coordinating sending out abort msges")
+        :abort
+    end
+    broadcast(slaves, {action, self()})
+    wait_acks(slaves, length(slaves), :ack)
+  end
 
-  defp query_to_commit(nodes), do: broadcast(nodes, {:query, self()})
 
-  defp broadcast(nodes, message), do: for node <- nodes, do: send(node, message)
+  defp wait_acks(slaves, 0, final) do 
+    case final do
+      :ack ->
+        log("Coordinator received all acks, sending commit messages")
+        broadcast(slaves, {:commit, self()})
+      _ ->
+        log("how did i get here?")
+    end
+  end
+
+  defp wait_acks(slaves, remaining, final) do
+    receive() do
+      {:ack} ->
+        wait_acks(slaves, remaining - 1, final)
+    end
+  end
+
+  def broadcast(nodes, message), do: for node <- nodes, do: send(node, message)
 
   defp log(:commit), do: log("Commit!")
 
@@ -92,7 +97,9 @@ defmodule PCNode do
       :yes -> "yes"
       :no -> "no"
       true -> "yes"
-      _ -> "no"
+      false -> "no"
+      nil -> "nil?"
+      _ -> "???"
     end
   end
 
