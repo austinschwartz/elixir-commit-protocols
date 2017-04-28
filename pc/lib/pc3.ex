@@ -42,6 +42,7 @@ defmodule PC3Node do
       {:prepare, coordinator} ->
         log("prepare from coordinator, sending ack") # xact
         send(coordinator, {:ack})
+        slave(slaves, :p, vote)
       {:commit, _} ->
         log(:commit)
       {:abort, _} ->

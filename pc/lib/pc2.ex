@@ -36,10 +36,8 @@ defmodule PC2Node do
         slave(slaves, state)
       {:commit, coordinator} ->
         log(:commit)
-        send(coordinator, {:ack})
       {:abort, coordinator} ->
         log(:abort)
-        send(coordinator, {:ack})
     end
   end
 
